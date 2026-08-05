@@ -7,7 +7,7 @@ Predicting Movie Success with Machine Learning
 # Predicting Highly Rated IMDb Movies
 A machine learning project built in R that predicts whether a movie will receive a **high IMDb rating (7.0 or above)** using movie metadata.
 
-## 📖 Project Overview
+## Project Overview
 This project explores whether characteristics such as a movie's **runtime, release decade, genre, international title coverage, and crew information** can be used to predict if a movie will receive a high IMDb rating.
 
 Using a sample of IMDb movie data, I built and compared two classification models:
