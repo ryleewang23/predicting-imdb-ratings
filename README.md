@@ -3,8 +3,6 @@ Predicting Movie Success with Machine Learning
 
 # Image of ROC Curve
 <img width="2100" height="1800" alt="roc_curves" src="https://github.com/user-attachments/assets/32d42711-f9de-4732-8266-c318189cbc5f" />
-or
-![ROC Curve](figures/roc_curves.png)
 
 # Predicting Highly Rated IMDb Movies
 A machine learning project built in R that predicts whether a movie will receive a **high IMDb rating (7.0 or above)** using movie metadata.
