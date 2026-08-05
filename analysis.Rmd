@@ -1,0 +1,545 @@
+---
+title: "Predicting Highly Rated IMDb Movies"
+author: "Rylee Wang"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 8, fig.height = 5)
+library(tidyverse)
+library(tidymodels)
+library(rpart.plot)
+tidymodels_prefer()
+set.seed(123)
+```
+
+# Project Overview
+
+## Research Question
+
+**Can movie metadata predict whether an IMDb movie receives an average rating of 7.0 or higher?**
+
+This project uses four sampled IMDb datasets and compares logistic regression with a decision tree. The analysis looks for associations, not causal effects.
+
+# Data
+
+Place these files in the `data/` folder:
+
+- `title.basics.csv`
+- `title.akas.csv`
+- `title.crew.csv`
+- `title.ratings.tsv`
+
+```{r load-data}
+basics <- read_csv(
+  "data/title.basics.csv",
+  show_col_types = FALSE
+)
+
+akas <- read_csv(
+  "data/title.akas.csv",
+  show_col_types = FALSE
+)
+
+crew <- read_csv(
+  "data/title.crew.csv",
+  show_col_types = FALSE
+)
+
+ratings <- read_tsv(
+  "data/title.ratings.tsv",
+  show_col_types = FALSE
+)
+```
+
+# Data Preparation
+
+```{r rename-identifiers}
+basics <- basics %>% rename(tid = 'title identifier')
+akas <- akas %>% rename(tid = titleId)
+crew <- crew %>% rename(tid = 'title identifier')
+ratings <- ratings %>% rename(tid = tconst)
+```
+
+## Movie information
+
+```{r prepare-movies}
+movies <- basics %>%
+  filter(titleType == "movie") %>%
+  mutate(
+    startYear = na_if(startYear, "\\N"),
+    runtimeMinutes = na_if(runtimeMinutes, "\\N"),
+    genres = na_if(genres, "\\N"),
+    startYear = as.numeric(startYear),
+    runtimeMinutes = as.numeric(runtimeMinutes),
+    release_decade = floor(startYear / 10) * 10,
+    primary_genre = str_extract(genres, "^[^,]+")
+  ) %>%
+  select(tid, primaryTitle, startYear, release_decade,
+         runtimeMinutes, primary_genre)
+
+nrow(movies)
+glimpse(movies)
+```
+
+## International-title coverage
+
+```{r prepare-akas}
+akas_summary <- akas %>%
+  mutate(region = na_if(region, "\\N")) %>%
+  group_by(tid) %>%
+  summarize(
+    n_akas = n(),
+    n_regions = n_distinct(region, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+head(akas_summary)
+```
+
+## Crew information
+
+```{r prepare-crew}
+crew_summary <- crew %>%
+  transmute(
+    tid,
+    has_director = case_when(
+      is.na(directors) ~ "No",
+      directors == "\\N" ~ "No",
+      TRUE ~ "Yes"
+    ),
+    has_writer = case_when(
+      is.na(writers) ~ "No",
+      writers == "\\N" ~ "No",
+      TRUE ~ "Yes"
+    )
+  )
+
+head(crew_summary)
+```
+
+## Final modeling dataset
+
+```{r build-model-data}
+movie_data <- movies %>%
+  inner_join(ratings, by = "tid") %>%
+  left_join(akas_summary, by = "tid") %>%
+  left_join(crew_summary, by = "tid") %>%
+  mutate(
+    n_akas = replace_na(n_akas, 0L),
+    n_regions = replace_na(n_regions, 0L),
+    has_director = replace_na(has_director, "No"),
+    has_writer = replace_na(has_writer, "No"),
+    high_rating = if_else(averageRating >= 7, "High", "Not High"),
+    high_rating = factor(high_rating, levels = c("High", "Not High")),
+    release_decade = factor(release_decade),
+    primary_genre = factor(primary_genre),
+    has_director = factor(has_director),
+    has_writer = factor(has_writer)
+  ) %>%
+  filter(!is.na(startYear), !is.na(primary_genre)) %>%
+  select(
+    tid, primaryTitle, high_rating, averageRating, numVotes,
+    startYear, release_decade, runtimeMinutes, primary_genre,
+    n_akas, n_regions, has_director, has_writer
+  )
+
+glimpse(movie_data)
+nrow(movie_data)
+count(movie_data, high_rating)
+```
+
+# Exploratory Data Analysis
+
+## Rating distribution
+
+```{r rating-distribution}
+rating_plot <- ggplot(movie_data, aes(x = averageRating)) +
+  geom_histogram(binwidth = 0.5, boundary = 0, fill = "pink", color = "hotpink") +
+  geom_vline(xintercept = 7, linetype = "dashed", color = "green") +
+  labs(
+    title = "Distribution of IMDb Movie Ratings",
+    subtitle = "Movies rated 7.0 or higher are classified as High",
+    x = "Average IMDb rating",
+    y = "Number of movies"
+  ) +
+  theme_minimal()
+
+rating_plot
+ggsave("figures/rating_distribution.png", rating_plot,
+       width = 8, height = 5)
+```
+
+## Highly rated movies by genre
+
+Because this is a small sample, genres only need at least five movies to appear in the graph.
+
+```{r genre-summary}
+genre_summary <- movie_data %>%
+  group_by(primary_genre) %>%
+  summarize(
+    movies = n(),
+    high_rating_rate = mean(high_rating == "High"),
+    mean_rating = mean(averageRating),
+    .groups = "drop"
+  ) %>%
+  filter(movies >= 5) %>%
+  arrange(desc(high_rating_rate))
+
+genre_summary
+```
+
+```{r genre-plot}
+genre_plot <- ggplot(
+  genre_summary,
+  aes(x = reorder(primary_genre, high_rating_rate),
+      y = high_rating_rate)
+) +
+  geom_col(fill = "turquoise") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Share of Highly Rated Movies by Primary Genre",
+    subtitle = "Genres represented by at least five movies",
+    x = "Primary genre",
+    y = "Movies rated 7.0 or higher"
+  ) +
+  theme_minimal()
+
+genre_plot
+ggsave("figures/high_rating_by_genre.png", genre_plot,
+       width = 8, height = 5)
+```
+
+## International coverage and ratings
+
+```{r coverage-plot}
+coverage_plot <- ggplot(movie_data, aes(x = n_regions, y = averageRating)) +
+  geom_point(alpha = 0.6, color = "hotpink") +
+  geom_smooth(method = "lm", se = FALSE, color = "purple") +
+  labs(
+    title = "IMDb Rating and International Title Coverage",
+    x = "Number of represented regions",
+    y = "Average IMDb rating"
+  ) +
+  theme_minimal()
+
+coverage_plot
+ggsave("figures/coverage_vs_rating.png", coverage_plot,
+       width = 8, height = 5)
+```
+
+# Train/Test Split
+
+```{r split-data}
+set.seed(123)
+movie_split <- initial_split(movie_data, prop = 0.80,
+                             strata = high_rating)
+movie_train <- training(movie_split)
+movie_test <- testing(movie_split)
+count(movie_train, high_rating)
+count(movie_test, high_rating)
+```
+
+# Preprocessing
+
+```{r preprocessing-recipe}
+movie_recipe <- recipe(
+  high_rating ~ runtimeMinutes + release_decade + primary_genre +
+    n_akas + n_regions + has_director + has_writer,
+  data = movie_train
+) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_other(primary_genre, threshold = 0.03) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+movie_recipe
+```
+
+# Model 1: Logistic Regression
+
+```{r logistic-model}
+logistic_model <- logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")
+
+logistic_workflow <- workflow() %>%
+  add_recipe(movie_recipe) %>%
+  add_model(logistic_model)
+
+logistic_fit <- fit(logistic_workflow, data = movie_train)
+logistic_fit
+```
+
+# Model 2: Decision Tree
+
+```{r tree-model}
+tree_model <- decision_tree(
+  tree_depth = 4,
+  min_n = 10,
+  cost_complexity = 0.01
+) %>%
+  set_engine("rpart") %>%
+  set_mode("classification")
+
+tree_workflow <- workflow() %>%
+  add_recipe(movie_recipe) %>%
+  add_model(tree_model)
+
+tree_fit <- fit(tree_workflow, data = movie_train)
+tree_fit
+```
+
+# Predictions
+
+```{r predictions}
+make_predictions <- function(fitted_workflow, test_data) {
+  test_data %>%
+    select(tid, primaryTitle, high_rating) %>%
+    bind_cols(predict(fitted_workflow, new_data = test_data,
+                      type = "class")) %>%
+    bind_cols(predict(fitted_workflow, new_data = test_data,
+                      type = "prob"))
+}
+
+logistic_predictions <- make_predictions(logistic_fit, movie_test)
+tree_predictions <- make_predictions(tree_fit, movie_test)
+```
+
+# Model Evaluation
+
+```{r evaluation-metrics}
+classification_metrics <- metric_set(
+  accuracy, bal_accuracy, precision, recall, f_meas
+)
+
+logistic_metrics <- classification_metrics(
+  logistic_predictions,
+  truth = high_rating,
+  estimate = .pred_class,
+  event_level = "first"
+) %>% mutate(model = "Logistic Regression")
+
+tree_metrics <- classification_metrics(
+  tree_predictions,
+  truth = high_rating,
+  estimate = .pred_class,
+  event_level = "first"
+) %>% mutate(model = "Decision Tree")
+
+logistic_auc <- roc_auc(
+  logistic_predictions,
+  truth = high_rating,
+  .pred_High,
+  event_level = "first"
+) %>% mutate(model = "Logistic Regression")
+
+tree_auc <- roc_auc(
+  tree_predictions,
+  truth = high_rating,
+  .pred_High,
+  event_level = "first"
+) %>% mutate(model = "Decision Tree")
+
+model_results <- bind_rows(
+  logistic_metrics, tree_metrics, logistic_auc, tree_auc
+) %>% select(model, .metric, .estimate)
+
+model_results
+```
+
+## Model comparison
+
+```{r model-comparison}
+comparison_plot <- model_results %>%
+  filter(.metric %in% c("accuracy", "bal_accuracy", "f_meas", "roc_auc")) %>%
+  ggplot(aes(x = model, y = .estimate, fill = .metric)) +
+  geom_col(position = "dodge") +
+  geom_text(
+    aes(label = round(.estimate, 2)),
+    position = position_dodge(width = 0.9),
+    vjust = -0.3,
+    size = 3
+  ) +
+  coord_cartesian(ylim = c(0, 1.05)) +
+  labs(
+    title = "IMDb Rating Prediction: Model Comparison",
+    x = NULL,
+    y = "Test-set score",
+    fill = "Metric"
+  ) +
+  theme_minimal()
+
+comparison_plot
+ggsave("figures/model_comparison.png", comparison_plot,
+       width = 9, height = 5)
+```
+
+## Confusion matrices
+
+```{r confusion-matrices}
+logistic_confusion <- conf_mat(
+  logistic_predictions,
+  truth = high_rating,
+  estimate = .pred_class
+)
+
+tree_confusion <- conf_mat(
+  tree_predictions,
+  truth = high_rating,
+  estimate = .pred_class
+)
+
+logistic_confusion
+tree_confusion
+```
+
+```{r logistic-confusion-plot}
+autoplot(logistic_confusion, type = "heatmap") +
+  labs(title = "Logistic Regression Confusion Matrix")
+```
+
+```{r tree-confusion-plot}
+autoplot(tree_confusion, type = "heatmap") +
+  labs(title = "Decision Tree Confusion Matrix")
+```
+
+## ROC curves
+
+```{r roc-curves}
+logistic_roc <- roc_curve(
+  logistic_predictions,
+  truth = high_rating,
+  .pred_High,
+  event_level = "first"
+) %>% mutate(model = "Logistic Regression")
+
+tree_roc <- roc_curve(
+  tree_predictions,
+  truth = high_rating,
+  .pred_High,
+  event_level = "first"
+) %>% mutate(model = "Decision Tree")
+
+roc_plot <- bind_rows(logistic_roc, tree_roc) %>%
+  ggplot(aes(x = 1 - specificity, y = sensitivity,
+             linetype = model)) +
+  geom_path(linewidth = 1, color = "hotpink") +
+  geom_abline(linetype = "dotted") +
+  coord_equal() +
+  labs(
+    title = "ROC Curves for IMDb Rating Models",
+    x = "False-positive rate",
+    y = "True-positive rate",
+    linetype = "Model"
+  ) +
+  theme_minimal()
+
+roc_plot
+ggsave("figures/roc_curves.png", roc_plot,
+       width = 7, height = 6)
+```
+
+# Decision Tree Visualization
+
+```{r tree-visualization}
+fitted_tree <- extract_fit_engine(tree_fit)
+rpart.plot(
+  fitted_tree,
+  type = 3,
+  extra = 104,
+  fallen.leaves = TRUE,
+  main = "Decision Tree for Predicting High IMDb Ratings"
+)
+```
+
+# Cross-Validation
+
+```{r cross-validation}
+set.seed(123)
+movie_folds <- vfold_cv(movie_train, v = 5,
+                        strata = high_rating)
+cv_metrics <- metric_set(accuracy, bal_accuracy, roc_auc)
+
+logistic_cv <- fit_resamples(
+  logistic_workflow,
+  resamples = movie_folds,
+  metrics = cv_metrics,
+  control = control_resamples(save_pred = TRUE)
+)
+
+tree_cv <- fit_resamples(
+  tree_workflow,
+  resamples = movie_folds,
+  metrics = cv_metrics,
+  control = control_resamples(save_pred = TRUE)
+)
+
+logistic_cv_results <- collect_metrics(logistic_cv) %>%
+  mutate(model = "Logistic Regression")
+
+tree_cv_results <- collect_metrics(tree_cv) %>%
+  mutate(model = "Decision Tree")
+
+bind_rows(logistic_cv_results, tree_cv_results) %>%
+  select(model, .metric, mean, std_err)
+```
+
+# Error Analysis
+
+```{r error-analysis}
+logistic_errors <- logistic_predictions %>%
+  filter(high_rating != .pred_class) %>%
+  left_join(
+    movie_data %>%
+      select(tid, averageRating, runtimeMinutes,
+             release_decade, primary_genre, n_regions),
+    by = "tid"
+  ) %>%
+  arrange(desc(.pred_High))
+
+head(logistic_errors, 15)
+```
+
+# Results
+
+Complete this section after running the report.
+
+The logistic regression model achieved:
+
+- Accuracy: **0.683**
+- Balanced accuracy: **0.532**
+- F1 score: **0.235**
+- ROC-AUC: **0.483**
+
+The decision tree achieved:
+
+- Accuracy: **0.732**
+- Balanced accuracy: **0.566**
+- F1 score: **0.267**
+- ROC-AUC: **0.611**
+
+Based on **ROC-AUC**, the **decision tree** performed better. Because the dataset is a small sample, the findings should be treated as exploratory.
+
+# Limitations
+
+1. The dataset is a course-provided sample rather than the complete IMDb database.
+2. Some movies are missing ratings, runtime, genre, or crew information.
+3. The 7.0 cutoff is a project-defined threshold.
+4. IMDb ratings can change over time.
+5. The model does not include budget, cast popularity, marketing, critic reviews, or release strategy.
+6. The models identify associations, not causal relationships.
+
+# Conclusion
+
+This project demonstrates relational joins, data cleaning, feature engineering, visualization, logistic regression, decision trees, cross-validation, model evaluation, and error analysis in R.
