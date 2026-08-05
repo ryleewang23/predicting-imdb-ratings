@@ -1,6 +1,8 @@
 # predicting-imdb-ratings
 Predicting Movie Success with Machine Learning
 
+**View the Interactive Report:** https://ryleewang23.github.io/predicting-imdb-ratings/ 
+
 # Image of ROC Curve
 <img width="2100" height="1800" alt="roc_curves" src="https://github.com/user-attachments/assets/32d42711-f9de-4732-8266-c318189cbc5f" />
 
